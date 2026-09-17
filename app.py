@@ -5,6 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 st.set_page_config(
@@ -34,6 +35,14 @@ def format_vnd(value: Decimal) -> str:
     """Định dạng tiền VND."""
     amount = int(round_money(value))
     return f"{amount:,.0f}".replace(",", ".") + " ₫"
+
+
+def parse_vnd_input(value: str) -> Decimal:
+    """Chuyển chuỗi tiền có dấu chấm phân tách hàng nghìn thành Decimal."""
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if not digits:
+        raise ValueError("Vui lòng nhập số tiền gửi hợp lệ.")
+    return Decimal(digits)
 
 
 def format_rate(value: Decimal) -> str:
@@ -447,12 +456,106 @@ with st.form("deposit_form"):
     col1, col2 = st.columns(2)
 
     with col1:
-        principal_input = st.number_input(
+        principal_input = st.text_input(
             "Số tiền khách hàng gửi (VND)",
-            min_value=1_000.0,
-            value=100_000_000.0,
-            step=1_000_000.0,
-            format="%.0f",
+            value="100.000.000",
+            key="principal_input",
+            help="Có thể nhập liền các chữ số. Ví dụ 500000000 sẽ tự hiển thị thành 500.000.000.",
+        )
+
+        # Tự động thêm dấu chấm sau mỗi 3 chữ số ngay khi người dùng nhập.
+        # JavaScript chỉ định dạng phần hiển thị. Giá trị gửi về Python vẫn được
+        # xử lý lại bằng parse_vnd_input để bảo đảm an toàn.
+        components.html(
+            r"""
+            <script>
+            (function () {
+                const labelText = "Số tiền khách hàng gửi (VND)";
+
+                function formatVND(raw) {
+                    let digits = String(raw).replace(/\D/g, "");
+                    digits = digits.replace(/^0+(?=\d)/, "");
+                    if (!digits) return "";
+                    return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+                }
+
+                function findInput(doc) {
+                    let input = doc.querySelector(
+                        'input[aria-label="' + labelText + '"]'
+                    );
+                    if (input) return input;
+
+                    const labels = Array.from(doc.querySelectorAll("label"));
+                    const label = labels.find(
+                        el => el.innerText && el.innerText.trim() === labelText
+                    );
+                    if (!label) return null;
+
+                    const container = label.closest('[data-testid="stTextInput"]');
+                    return container ? container.querySelector("input") : null;
+                }
+
+                function attachFormatter() {
+                    const doc = window.parent.document;
+                    const input = findInput(doc);
+                    if (!input) return false;
+                    if (input.dataset.vndFormatterAttached === "1") return true;
+
+                    input.dataset.vndFormatterAttached = "1";
+                    input.setAttribute("inputmode", "numeric");
+
+                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                        window.parent.HTMLInputElement.prototype,
+                        "value"
+                    ).set;
+
+                    function applyFormat(event) {
+                        if (input.dataset.vndFormatting === "1") return;
+
+                        const oldValue = input.value;
+                        const oldCursor = input.selectionStart == null
+                            ? oldValue.length
+                            : input.selectionStart;
+                        const digitsBeforeCursor = oldValue
+                            .slice(0, oldCursor)
+                            .replace(/\D/g, "").length;
+
+                        const formatted = formatVND(oldValue);
+                        if (formatted === oldValue) return;
+
+                        input.dataset.vndFormatting = "1";
+                        nativeSetter.call(input, formatted);
+                        input.dispatchEvent(new Event("input", { bubbles: true }));
+
+                        let newCursor = 0;
+                        let digitCount = 0;
+                        while (newCursor < formatted.length && digitCount < digitsBeforeCursor) {
+                            if (/\d/.test(formatted[newCursor])) digitCount += 1;
+                            newCursor += 1;
+                        }
+                        try {
+                            input.setSelectionRange(newCursor, newCursor);
+                        } catch (e) {}
+
+                        delete input.dataset.vndFormatting;
+                    }
+
+                    input.addEventListener("input", applyFormat);
+                    applyFormat();
+                    return true;
+                }
+
+                const timer = setInterval(function () {
+                    if (attachFormatter()) clearInterval(timer);
+                }, 100);
+
+                setTimeout(function () {
+                    clearInterval(timer);
+                }, 5000);
+            })();
+            </script>
+            """,
+            height=0,
         )
 
         term_rate_input = st.number_input(
@@ -528,7 +631,7 @@ with st.form("deposit_form"):
 # =========================
 if calculate_button:
     try:
-        principal = D(principal_input)
+        principal = parse_vnd_input(principal_input)
         term_rate = D(term_rate_input)
         demand_rate = D(demand_rate_input)
 
