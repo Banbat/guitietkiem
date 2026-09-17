@@ -1,0 +1,646 @@
+
+import calendar
+from datetime import date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
+
+import pandas as pd
+import streamlit as st
+
+
+st.set_page_config(
+    page_title="Tính lãi tiền gửi tiết kiệm",
+    page_icon="💰",
+    layout="wide",
+)
+
+
+# =========================
+# HÀM TIỆN ÍCH
+# =========================
+MONEY_QUANT = Decimal("1")
+
+
+def D(value) -> Decimal:
+    """Chuyển số sang Decimal an toàn."""
+    return Decimal(str(value))
+
+
+def round_money(value: Decimal) -> Decimal:
+    """Làm tròn đến 1 đồng."""
+    return value.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+
+def format_vnd(value: Decimal) -> str:
+    """Định dạng tiền VND."""
+    amount = int(round_money(value))
+    return f"{amount:,.0f}".replace(",", ".") + " ₫"
+
+
+def format_rate(value: Decimal) -> str:
+    return f"{value:.4f}".rstrip("0").rstrip(".") + "%"
+
+
+def add_months(d: date, months: int) -> date:
+    """Cộng số tháng vào một ngày, tự điều chỉnh ngày cuối tháng."""
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def add_term(d: date, term_value: int, term_unit: str) -> date:
+    """Tính ngày đáo hạn theo kỳ hạn."""
+    if term_unit == "Ngày":
+        return d + timedelta(days=term_value)
+    if term_unit == "Tháng":
+        return add_months(d, term_value)
+    if term_unit == "Năm":
+        return add_months(d, term_value * 12)
+    raise ValueError("Đơn vị kỳ hạn không hợp lệ.")
+
+
+def interest_by_days(
+    principal: Decimal,
+    annual_rate_percent: Decimal,
+    days: int,
+    day_basis: int = 365,
+) -> Decimal:
+    """
+    Tiền lãi = Gốc × Lãi suất năm × Số ngày thực tế / Cơ sở ngày.
+    Ngày gửi được tính lãi, ngày kết thúc không được tính lãi.
+    Vì vậy số ngày tính lãi = end_date - start_date.
+    """
+    if days <= 0:
+        return Decimal("0")
+    return (
+        principal
+        * annual_rate_percent
+        / Decimal("100")
+        * Decimal(days)
+        / Decimal(day_basis)
+    )
+
+
+def monthly_boundaries(cycle_start: date, cycle_end: date):
+    """
+    Tạo các mốc trả lãi hàng tháng.
+    Mốc cuối cùng luôn là ngày đáo hạn của chu kỳ.
+    """
+    boundaries = []
+    k = 1
+
+    while True:
+        candidate = add_months(cycle_start, k)
+        if candidate >= cycle_end:
+            boundaries.append(cycle_end)
+            break
+        boundaries.append(candidate)
+        k += 1
+
+    return boundaries
+
+
+def monthly_interest_schedule(
+    principal: Decimal,
+    annual_rate: Decimal,
+    cycle_start: date,
+    cycle_end: date,
+    day_basis: int,
+):
+    """Lập lịch trả lãi hàng tháng cho một chu kỳ đầy đủ."""
+    rows = []
+    prev = cycle_start
+
+    for payment_date in monthly_boundaries(cycle_start, cycle_end):
+        days = (payment_date - prev).days
+        interest = interest_by_days(
+            principal=principal,
+            annual_rate_percent=annual_rate,
+            days=days,
+            day_basis=day_basis,
+        )
+
+        rows.append(
+            {
+                "Ngày nhận lãi": payment_date,
+                "Từ ngày": prev,
+                "Đến trước ngày": payment_date,
+                "Số ngày": days,
+                "Lãi suất áp dụng": annual_rate,
+                "Tiền lãi": interest,
+            }
+        )
+        prev = payment_date
+
+    return rows
+
+
+def monthly_paid_before_withdrawal(
+    principal: Decimal,
+    annual_rate: Decimal,
+    cycle_start: date,
+    scheduled_cycle_end: date,
+    withdrawal_date: date,
+    day_basis: int,
+):
+    """
+    Xác định các khoản lãi hàng tháng đã được trả trước ngày rút
+    trong một chu kỳ đang bị rút trước hạn.
+    """
+    rows = []
+    prev = cycle_start
+
+    for payment_date in monthly_boundaries(cycle_start, scheduled_cycle_end):
+        if payment_date > withdrawal_date:
+            break
+
+        days = (payment_date - prev).days
+        interest = interest_by_days(
+            principal=principal,
+            annual_rate_percent=annual_rate,
+            days=days,
+            day_basis=day_basis,
+        )
+
+        rows.append(
+            {
+                "Ngày nhận lãi": payment_date,
+                "Từ ngày": prev,
+                "Đến trước ngày": payment_date,
+                "Số ngày": days,
+                "Lãi suất áp dụng": annual_rate,
+                "Tiền lãi": interest,
+            }
+        )
+        prev = payment_date
+
+    return rows
+
+
+def calculate_deposit(
+    principal: Decimal,
+    term_rate: Decimal,
+    demand_rate: Decimal,
+    deposit_date: date,
+    withdrawal_date: date,
+    term_value: int,
+    term_unit: str,
+    payout_method: str,
+    day_basis: int = 365,
+):
+    """
+    Quy tắc chính:
+    1. Mỗi chu kỳ đầy đủ hưởng lãi suất có kỳ hạn.
+    2. Nếu khách hàng rút trong một chu kỳ chưa đáo hạn,
+       toàn bộ phần thời gian của chu kỳ hiện tại hưởng lãi suất không kỳ hạn.
+    3. Các chu kỳ đã đáo hạn trước đó vẫn giữ lãi suất có kỳ hạn.
+    4. Nếu chưa rút khi đáo hạn, gốc tự động tái tục với đúng kỳ hạn cũ.
+    5. Lãi không nhập gốc. Đây là cơ chế tái tục gốc.
+    6. Với nhận lãi trước hoặc nhận lãi hàng tháng,
+       nếu rút trước hạn thì phần lãi đã trả trong chu kỳ hiện tại
+       được đối trừ khi tất toán để lãi ròng của chu kỳ đó
+       đúng bằng lãi suất không kỳ hạn.
+    """
+    if withdrawal_date <= deposit_date:
+        raise ValueError("Ngày rút tiền phải sau ngày gửi tiền.")
+
+    if principal <= 0:
+        raise ValueError("Số tiền gửi phải lớn hơn 0.")
+
+    if term_rate < 0 or demand_rate < 0:
+        raise ValueError("Lãi suất không được âm.")
+
+    if term_value <= 0:
+        raise ValueError("Kỳ hạn phải lớn hơn 0.")
+
+    schedule = []
+    cycle_no = 1
+    cycle_start = deposit_date
+
+    interest_paid_before_settlement = Decimal("0")
+    settlement_interest_or_adjustment = Decimal("0")
+    term_interest_total = Decimal("0")
+    demand_interest_total = Decimal("0")
+    completed_cycles = 0
+    is_early_withdrawal = False
+
+    while True:
+        scheduled_end = add_term(cycle_start, term_value, term_unit)
+
+        # Trường hợp ngày rút đúng hoặc sau ngày đáo hạn của chu kỳ hiện tại
+        if withdrawal_date >= scheduled_end:
+            completed_cycles += 1
+            days = (scheduled_end - cycle_start).days
+            full_cycle_interest = interest_by_days(
+                principal,
+                term_rate,
+                days,
+                day_basis,
+            )
+            term_interest_total += full_cycle_interest
+
+            if payout_method == "Nhận lãi trước":
+                payment_date = cycle_start
+                schedule.append(
+                    {
+                        "Chu kỳ": cycle_no,
+                        "Loại giao dịch": "Trả lãi trước",
+                        "Ngày thanh toán": payment_date,
+                        "Từ ngày": cycle_start,
+                        "Đến trước ngày": scheduled_end,
+                        "Số ngày": days,
+                        "Lãi suất": format_rate(term_rate),
+                        "Số tiền": round_money(full_cycle_interest),
+                    }
+                )
+                interest_paid_before_settlement += full_cycle_interest
+
+            elif payout_method == "Nhận lãi hàng tháng":
+                monthly_rows = monthly_interest_schedule(
+                    principal,
+                    term_rate,
+                    cycle_start,
+                    scheduled_end,
+                    day_basis,
+                )
+                for row in monthly_rows:
+                    schedule.append(
+                        {
+                            "Chu kỳ": cycle_no,
+                            "Loại giao dịch": "Trả lãi hàng tháng",
+                            "Ngày thanh toán": row["Ngày nhận lãi"],
+                            "Từ ngày": row["Từ ngày"],
+                            "Đến trước ngày": row["Đến trước ngày"],
+                            "Số ngày": row["Số ngày"],
+                            "Lãi suất": format_rate(term_rate),
+                            "Số tiền": round_money(row["Tiền lãi"]),
+                        }
+                    )
+                    interest_paid_before_settlement += row["Tiền lãi"]
+
+            elif payout_method == "Nhận lãi cuối kỳ":
+                schedule.append(
+                    {
+                        "Chu kỳ": cycle_no,
+                        "Loại giao dịch": "Trả lãi cuối kỳ",
+                        "Ngày thanh toán": scheduled_end,
+                        "Từ ngày": cycle_start,
+                        "Đến trước ngày": scheduled_end,
+                        "Số ngày": days,
+                        "Lãi suất": format_rate(term_rate),
+                        "Số tiền": round_money(full_cycle_interest),
+                    }
+                )
+                interest_paid_before_settlement += full_cycle_interest
+
+            # Nếu rút đúng ngày đáo hạn, kết thúc tại đây
+            if withdrawal_date == scheduled_end:
+                schedule.append(
+                    {
+                        "Chu kỳ": cycle_no,
+                        "Loại giao dịch": "Hoàn trả tiền gốc",
+                        "Ngày thanh toán": withdrawal_date,
+                        "Từ ngày": "",
+                        "Đến trước ngày": "",
+                        "Số ngày": "",
+                        "Lãi suất": "",
+                        "Số tiền": round_money(principal),
+                    }
+                )
+                break
+
+            # Không rút tại đáo hạn: tự động tái tục gốc cùng kỳ hạn
+            cycle_start = scheduled_end
+            cycle_no += 1
+            continue
+
+        # Trường hợp rút trước ngày đáo hạn của chu kỳ hiện tại
+        is_early_withdrawal = True
+        actual_days = (withdrawal_date - cycle_start).days
+        demand_interest = interest_by_days(
+            principal,
+            demand_rate,
+            actual_days,
+            day_basis,
+        )
+        demand_interest_total += demand_interest
+
+        already_paid_current_cycle = Decimal("0")
+
+        if payout_method == "Nhận lãi trước":
+            scheduled_days = (scheduled_end - cycle_start).days
+            upfront_interest = interest_by_days(
+                principal,
+                term_rate,
+                scheduled_days,
+                day_basis,
+            )
+            already_paid_current_cycle = upfront_interest
+            interest_paid_before_settlement += upfront_interest
+
+            schedule.append(
+                {
+                    "Chu kỳ": cycle_no,
+                    "Loại giao dịch": "Lãi trước đã nhận",
+                    "Ngày thanh toán": cycle_start,
+                    "Từ ngày": cycle_start,
+                    "Đến trước ngày": scheduled_end,
+                    "Số ngày": scheduled_days,
+                    "Lãi suất": format_rate(term_rate),
+                    "Số tiền": round_money(upfront_interest),
+                }
+            )
+
+        elif payout_method == "Nhận lãi hàng tháng":
+            paid_rows = monthly_paid_before_withdrawal(
+                principal,
+                term_rate,
+                cycle_start,
+                scheduled_end,
+                withdrawal_date,
+                day_basis,
+            )
+
+            for row in paid_rows:
+                already_paid_current_cycle += row["Tiền lãi"]
+                interest_paid_before_settlement += row["Tiền lãi"]
+
+                schedule.append(
+                    {
+                        "Chu kỳ": cycle_no,
+                        "Loại giao dịch": "Lãi tháng đã nhận",
+                        "Ngày thanh toán": row["Ngày nhận lãi"],
+                        "Từ ngày": row["Từ ngày"],
+                        "Đến trước ngày": row["Đến trước ngày"],
+                        "Số ngày": row["Số ngày"],
+                        "Lãi suất": format_rate(term_rate),
+                        "Số tiền": round_money(row["Tiền lãi"]),
+                    }
+                )
+
+        # Số điều chỉnh tại ngày rút:
+        # Lãi đúng được hưởng theo không kỳ hạn trừ đi phần đã trả trong chu kỳ hiện tại.
+        adjustment = demand_interest - already_paid_current_cycle
+        settlement_interest_or_adjustment = adjustment
+
+        schedule.append(
+            {
+                "Chu kỳ": cycle_no,
+                "Loại giao dịch": (
+                    "Lãi không kỳ hạn khi rút trước hạn"
+                    if already_paid_current_cycle == 0
+                    else "Điều chỉnh lãi khi rút trước hạn"
+                ),
+                "Ngày thanh toán": withdrawal_date,
+                "Từ ngày": cycle_start,
+                "Đến trước ngày": withdrawal_date,
+                "Số ngày": actual_days,
+                "Lãi suất": format_rate(demand_rate),
+                "Số tiền": round_money(adjustment),
+            }
+        )
+
+        schedule.append(
+            {
+                "Chu kỳ": cycle_no,
+                "Loại giao dịch": "Hoàn trả tiền gốc",
+                "Ngày thanh toán": withdrawal_date,
+                "Từ ngày": "",
+                "Đến trước ngày": "",
+                "Số ngày": "",
+                "Lãi suất": "",
+                "Số tiền": round_money(principal),
+            }
+        )
+        break
+
+    net_interest = term_interest_total + demand_interest_total
+    total_received = principal + net_interest
+    settlement_amount = principal + settlement_interest_or_adjustment
+
+    return {
+        "completed_cycles": completed_cycles,
+        "is_early_withdrawal": is_early_withdrawal,
+        "term_interest_total": term_interest_total,
+        "demand_interest_total": demand_interest_total,
+        "net_interest": net_interest,
+        "interest_paid_before_settlement": interest_paid_before_settlement,
+        "settlement_interest_or_adjustment": settlement_interest_or_adjustment,
+        "settlement_amount": settlement_amount,
+        "total_received": total_received,
+        "schedule": schedule,
+    }
+
+
+# =========================
+# GIAO DIỆN
+# =========================
+st.title("💰 Ứng dụng tính lãi tiền gửi tiết kiệm")
+
+st.caption(
+    "Ứng dụng tính theo số ngày thực tế. Ngày gửi được tính lãi, "
+    "ngày đáo hạn hoặc ngày rút không được tính lãi."
+)
+
+with st.form("deposit_form"):
+    col1, col2 = st.columns(2)
+
+    with col1:
+        principal_input = st.number_input(
+            "Số tiền khách hàng gửi (VND)",
+            min_value=1_000.0,
+            value=100_000_000.0,
+            step=1_000_000.0,
+            format="%.0f",
+        )
+
+        term_rate_input = st.number_input(
+            "Lãi suất có kỳ hạn (%/năm)",
+            min_value=0.0,
+            value=5.0,
+            step=0.1,
+            format="%.3f",
+        )
+
+        demand_rate_input = st.number_input(
+            "Lãi suất không kỳ hạn (%/năm)",
+            min_value=0.0,
+            value=0.2,
+            step=0.05,
+            format="%.3f",
+        )
+
+        payout_method = st.radio(
+            "Cách nhận tiền lãi",
+            [
+                "Nhận lãi trước",
+                "Nhận lãi hàng tháng",
+                "Nhận lãi cuối kỳ",
+            ],
+        )
+
+    with col2:
+        deposit_date_input = st.date_input(
+            "Ngày gửi tiền",
+            value=date.today(),
+            format="DD/MM/YYYY",
+        )
+
+        withdrawal_date_input = st.date_input(
+            "Ngày rút tiền",
+            value=date.today() + timedelta(days=365),
+            format="DD/MM/YYYY",
+        )
+
+        term_col1, term_col2 = st.columns([2, 1])
+
+        with term_col1:
+            term_value_input = st.number_input(
+                "Kỳ hạn gửi tiền",
+                min_value=1,
+                value=12,
+                step=1,
+            )
+
+        with term_col2:
+            term_unit_input = st.selectbox(
+                "Đơn vị",
+                ["Tháng", "Ngày", "Năm"],
+            )
+
+        day_basis = st.selectbox(
+            "Cơ sở tính lãi",
+            [365, 360],
+            index=0,
+            help="Mặc định 365 ngày/năm. Có thể đổi thành 360 nếu quy định của ngân hàng yêu cầu.",
+        )
+
+    calculate_button = st.form_submit_button(
+        "TÍNH TOÁN",
+        type="primary",
+        use_container_width=True,
+    )
+
+
+# =========================
+# KẾT QUẢ
+# =========================
+if calculate_button:
+    try:
+        principal = D(principal_input)
+        term_rate = D(term_rate_input)
+        demand_rate = D(demand_rate_input)
+
+        result = calculate_deposit(
+            principal=principal,
+            term_rate=term_rate,
+            demand_rate=demand_rate,
+            deposit_date=deposit_date_input,
+            withdrawal_date=withdrawal_date_input,
+            term_value=int(term_value_input),
+            term_unit=term_unit_input,
+            payout_method=payout_method,
+            day_basis=int(day_basis),
+        )
+
+        first_maturity = add_term(
+            deposit_date_input,
+            int(term_value_input),
+            term_unit_input,
+        )
+
+        st.divider()
+        st.subheader("Kết quả tính toán")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Tiền gốc", format_vnd(principal))
+        c2.metric("Tổng tiền lãi ròng", format_vnd(result["net_interest"]))
+        c3.metric(
+            "Tổng gốc và lãi khách hàng nhận",
+            format_vnd(result["total_received"]),
+        )
+
+        c4, c5, c6 = st.columns(3)
+        c4.metric("Ngày đáo hạn đầu tiên", first_maturity.strftime("%d/%m/%Y"))
+        c5.metric("Số kỳ đã hoàn tất", str(result["completed_cycles"]))
+        c6.metric(
+            "Trạng thái kỳ hiện tại",
+            "Rút trước hạn" if result["is_early_withdrawal"] else "Đúng ngày đáo hạn",
+        )
+
+        if result["is_early_withdrawal"]:
+            st.warning(
+                "Khách hàng rút trong một kỳ chưa đáo hạn. "
+                "Phần thời gian của kỳ hiện tại được tính lại theo lãi suất không kỳ hạn. "
+                "Các kỳ đã đáo hạn trước đó vẫn giữ lãi suất có kỳ hạn."
+            )
+
+            st.write(
+                f"Tiền lãi không kỳ hạn của kỳ đang rút trước hạn: "
+                f"**{format_vnd(result['demand_interest_total'])}**"
+            )
+
+            if result["settlement_interest_or_adjustment"] < 0:
+                st.write(
+                    "Do khách hàng đã nhận lãi trước hoặc lãi hàng tháng cao hơn "
+                    "mức lãi không kỳ hạn được hưởng trong kỳ hiện tại, "
+                    f"ngân hàng cần đối trừ **{format_vnd(abs(result['settlement_interest_or_adjustment']))}** "
+                    "khi tất toán."
+                )
+
+            st.write(
+                f"Số tiền thực nhận tại đúng ngày rút, sau khi tính phần đã nhận trước đó: "
+                f"**{format_vnd(result['settlement_amount'])}**"
+            )
+
+        st.info(
+            "Quy tắc tái tục đang áp dụng: tái tục tiền gốc, giữ nguyên kỳ hạn và "
+            "lãi suất có kỳ hạn đã nhập. Tiền lãi được chi trả theo phương thức khách hàng chọn."
+        )
+
+        st.subheader("Chi tiết lịch trả lãi và tất toán")
+
+        df = pd.DataFrame(result["schedule"])
+
+        if not df.empty:
+            display_df = df.copy()
+
+            for col in ["Ngày thanh toán", "Từ ngày", "Đến trước ngày"]:
+                display_df[col] = display_df[col].apply(
+                    lambda x: x.strftime("%d/%m/%Y")
+                    if isinstance(x, date)
+                    else x
+                )
+
+            display_df["Số tiền"] = display_df["Số tiền"].apply(format_vnd)
+
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with st.expander("Quy tắc tính đang được áp dụng"):
+            st.markdown(
+                """
+1. Ngày gửi tiền được tính lãi. Ngày đáo hạn hoặc ngày rút tiền không được tính lãi.
+
+2. Số ngày tính lãi của một khoảng thời gian bằng ngày kết thúc trừ ngày bắt đầu.
+
+3. Tiền lãi được tính theo công thức: tiền gốc nhân lãi suất năm nhân số ngày thực tế chia cho cơ sở ngày.
+
+4. Nếu khách hàng rút trước hạn trong kỳ hiện tại, toàn bộ số ngày của kỳ hiện tại chỉ hưởng lãi suất không kỳ hạn.
+
+5. Nếu khách hàng đã đi qua một hoặc nhiều kỳ đáo hạn, các kỳ đã hoàn tất vẫn hưởng lãi suất có kỳ hạn. Kỳ đang dở tại ngày rút được tính theo lãi suất không kỳ hạn.
+
+6. Nếu khách hàng không rút khi đến hạn, tiền gốc tự động được tái tục với đúng kỳ hạn ban đầu.
+
+7. Với phương thức nhận lãi trước hoặc nhận lãi hàng tháng, nếu khách hàng rút trước hạn thì ứng dụng đối trừ phần lãi đã nhận trong kỳ hiện tại để lãi ròng của kỳ đó đúng bằng lãi suất không kỳ hạn.
+
+8. Ứng dụng hiện giả định tái tục gốc. Lãi không nhập vào gốc ở kỳ kế tiếp.
+                """
+            )
+
+    except Exception as exc:
+        st.error(str(exc))
