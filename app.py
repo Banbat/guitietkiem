@@ -44,248 +44,24 @@ def parse_vnd_input(value: str) -> Decimal:
     return Decimal(digits)
 
 
-# =========================
-# Ô NHẬP TIỀN ĐỊNH DẠNG TRỰC TIẾP KHI GÕ
-# =========================
-MONEY_INPUT_HTML = r"""
-<div class="money-input-wrap">
-    <label class="money-input-label" for="money-input"></label>
-    <input
-        id="money-input"
-        class="money-input-control"
-        type="text"
-        inputmode="numeric"
-        autocomplete="off"
-        spellcheck="false"
-    />
-    <div class="money-input-help"></div>
-</div>
-"""
-
-MONEY_INPUT_CSS = r"""
-.money-input-wrap {
-    width: 100%;
-    font-family: var(--font, sans-serif);
-}
-
-.money-input-label {
-    display: block;
-    margin-bottom: 0.35rem;
-    font-size: 0.875rem;
-    line-height: 1.25rem;
-    font-weight: 400;
-    color: var(--text-color, inherit);
-}
-
-.money-input-control {
-    box-sizing: border-box;
-    width: 100%;
-    min-height: 2.5rem;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid rgba(49, 51, 63, 0.2);
-    border-radius: 0.5rem;
-    outline: none;
-    background: var(--background-color, transparent);
-    color: var(--text-color, inherit);
-    font: inherit;
-    font-size: 1rem;
-    line-height: 1.5rem;
-    transition: border-color 0.12s ease, box-shadow 0.12s ease;
-}
-
-.money-input-control:focus {
-    border-color: rgb(255, 75, 75);
-    box-shadow: 0 0 0 1px rgb(255, 75, 75);
-}
-
-.money-input-control::placeholder {
-    opacity: 0.55;
-}
-
-.money-input-help {
-    margin-top: 0.25rem;
-    min-height: 1rem;
-    font-size: 0.75rem;
-    line-height: 1rem;
-    opacity: 0.7;
-}
-"""
-
-MONEY_INPUT_JS = r"""
-export default function(component) {
-    const { setStateValue, parentElement, data } = component;
-
-    const input = parentElement.querySelector('#money-input');
-    const label = parentElement.querySelector('.money-input-label');
-    const help = parentElement.querySelector('.money-input-help');
-
-    label.textContent = data.label ?? '';
-    help.textContent = data.help ?? '';
-    input.placeholder = data.placeholder ?? '';
-
-    function onlyDigits(value) {
-        let digits = String(value ?? '').replace(/\D/g, '');
-        digits = digits.replace(/^0+(?=\d)/, '');
-        return digits;
-    }
-
-    function formatThousands(value) {
-        const digits = onlyDigits(value);
-        if (!digits) return '';
-        return digits.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
-    }
-
-    function cursorAfterDigitCount(formatted, digitCount) {
-        if (digitCount <= 0) return 0;
-
-        let count = 0;
-        for (let i = 0; i < formatted.length; i++) {
-            if (/\d/.test(formatted[i])) {
-                count += 1;
-                if (count === digitCount) return i + 1;
-            }
-        }
-        return formatted.length;
-    }
-
-    // Chỉ đồng bộ dữ liệu từ Python khi cần. Không ghi đè nội dung
-    // đang được người dùng gõ nếu giá trị đã giống nhau.
-    const incoming = formatThousands(data.value ?? '');
-    if (input.value !== incoming && document.activeElement !== input) {
-        input.value = incoming;
-    }
-
-    input.oninput = (event) => {
-        const raw = event.target.value;
-        const oldCursor = event.target.selectionStart ?? raw.length;
-        const digitsBeforeCursor = raw
-            .slice(0, oldCursor)
-            .replace(/\D/g, '')
-            .length;
-
-        const formatted = formatThousands(raw);
-        event.target.value = formatted;
-
-        const newCursor = cursorAfterDigitCount(
-            formatted,
-            digitsBeforeCursor
-        );
-        event.target.setSelectionRange(newCursor, newCursor);
-
-        // Đồng bộ giá trị đã định dạng về Python ngay trong lúc gõ.
-        setStateValue('value', formatted);
-    };
-
-    input.onkeydown = (event) => {
-        // Chỉ cho phép phím điều hướng, chỉnh sửa và tổ hợp phím hệ thống.
-        if (
-            event.ctrlKey ||
-            event.metaKey ||
-            event.altKey ||
-            ['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight',
-             'ArrowUp', 'ArrowDown', 'Home', 'End', 'Tab', 'Enter'].includes(event.key) ||
-            /^\d$/.test(event.key)
-        ) {
-            return;
-        }
-        event.preventDefault();
-    };
-
-    input.onpaste = (event) => {
-        event.preventDefault();
-        const pasted = (event.clipboardData || window.clipboardData)
-            .getData('text');
-        const digits = onlyDigits(pasted);
-        if (!digits) return;
-
-        const start = input.selectionStart ?? input.value.length;
-        const end = input.selectionEnd ?? start;
-        const currentDigits = onlyDigits(input.value);
-        const digitsBefore = onlyDigits(input.value.slice(0, start));
-        const digitsSelected = onlyDigits(input.value.slice(start, end));
-
-        const insertIndex = digitsBefore.length;
-        const deleteCount = digitsSelected.length;
-        const merged =
-            currentDigits.slice(0, insertIndex) +
-            digits +
-            currentDigits.slice(insertIndex + deleteCount);
-
-        const formatted = formatThousands(merged);
-        input.value = formatted;
-
-        const newCursor = cursorAfterDigitCount(
-            formatted,
-            insertIndex + digits.length
-        );
-        input.setSelectionRange(newCursor, newCursor);
-        setStateValue('value', formatted);
-    };
-}
-"""
-
-
-def create_money_input_component():
-    """Tạo Custom Component v2 cho ô tiền VND."""
-    if not hasattr(st.components, "v2"):
-        return None
-
-    return st.components.v2.component(
-        "formatted_vnd_money_input",
-        html=MONEY_INPUT_HTML,
-        css=MONEY_INPUT_CSS,
-        js=MONEY_INPUT_JS,
-    )
-
-
-MONEY_INPUT_COMPONENT = create_money_input_component()
-
-
-def vnd_money_input(
-    label: str,
-    *,
-    default: str = "",
-    key: str,
-    placeholder: str = "",
-    help_text: str = "",
-) -> str:
+def normalize_principal_input():
     """
-    Ô nhập tiền hiển thị dấu chấm hàng nghìn ngay khi người dùng gõ.
+    Chuẩn hóa số tiền trong ô nhập về dạng 1.234.567.890.
 
-    Ví dụ: gõ 500000000 thì ngay trong quá trình nhập sẽ hiển thị
-    500.000.000, không cần nhấn Enter và không cần rời khỏi ô nhập.
+    Hàm này được gọi bằng on_change của Streamlit nên không cần JavaScript
+    can thiệp trực tiếp vào DOM. Giá trị hiển thị và giá trị trong
+    st.session_state luôn đồng bộ.
     """
-    if MONEY_INPUT_COMPONENT is None:
-        st.error(
-            "Tính năng định dạng tiền trực tiếp cần Streamlit 1.51.0 trở lên. "
-            "Hãy chạy: pip install -U streamlit"
-        )
-        st.stop()
+    raw = str(st.session_state.get("principal_input", ""))
+    digits = "".join(ch for ch in raw if ch.isdigit())
 
-    component_state = st.session_state.get(key, {})
-    if hasattr(component_state, "get"):
-        current_value = component_state.get("value", default)
-    else:
-        current_value = default
+    if not digits:
+        st.session_state["principal_input"] = ""
+        return
 
-    if not current_value:
-        current_value = default
-
-    result = MONEY_INPUT_COMPONENT(
-        data={
-            "label": label,
-            "value": current_value,
-            "placeholder": placeholder,
-            "help": help_text,
-        },
-        default={"value": current_value},
-        key=key,
-        on_value_change=lambda: None,
-        width="stretch",
-    )
-
-    result_value = getattr(result, "value", None)
-    return result_value if result_value is not None else current_value
+    # Bỏ các số 0 vô nghĩa ở đầu nhưng vẫn giữ giá trị 0 nếu người dùng nhập 0.
+    digits = digits.lstrip("0") or "0"
+    st.session_state["principal_input"] = f"{int(digits):,}".replace(",", ".")
 
 
 def format_rate(value: Decimal) -> str:
@@ -695,17 +471,21 @@ st.caption(
     "ngày đáo hạn hoặc ngày rút không được tính lãi."
 )
 
+# Khởi tạo giá trị tiền gửi chỉ một lần.
+if "principal_input" not in st.session_state:
+    st.session_state["principal_input"] = "100.000.000"
+
 col1, col2 = st.columns(2)
 
 with col1:
-    principal_input = vnd_money_input(
+    principal_input = st.text_input(
         "Số tiền khách hàng gửi (VND)",
-        default="100.000.000",
-        key="principal_money_input",
+        key="principal_input",
+        on_change=normalize_principal_input,
         placeholder="Ví dụ: 500000000",
-        help_text=(
-            "Dấu chấm phân cách hàng nghìn được thêm ngay khi gõ. "
-            "Ví dụ: 500000000 → 500.000.000."
+        help=(
+            "Nhập các chữ số, ví dụ 500000000. "
+            "Khi nhấn Enter hoặc chuyển sang ô khác, ứng dụng tự định dạng thành 500.000.000."
         ),
     )
 
