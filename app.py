@@ -1,4 +1,31 @@
+import streamlit as st
 
+# Cấu hình trang
+st.set_page_config(
+    page_title="Tính tiền lãi tiết kiệm",
+    page_icon="logo.jpg",
+    layout="wide"
+)
+
+# Hiển thị logo ở giữa phía trên
+col1, col2, col3 = st.columns([2, 1, 2])
+
+with col2:
+    st.image("logo.jpg", use_container_width=True)
+
+# Tiêu đề chính
+st.markdown(
+    """
+    <h1 style="
+        text-align: center;
+        margin-top: 10px;
+        margin-bottom: 30px;
+    ">
+        TÍNH TIỀN LÃI TIẾT KIỆM
+    </h1>
+    """,
+    unsafe_allow_html=True
+)
 import calendar
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
