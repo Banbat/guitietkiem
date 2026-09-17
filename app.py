@@ -5,7 +5,6 @@ from decimal import Decimal, ROUND_HALF_UP
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 
 st.set_page_config(
@@ -43,6 +42,26 @@ def parse_vnd_input(value: str) -> Decimal:
     if not digits:
         raise ValueError("Vui lòng nhập số tiền gửi hợp lệ.")
     return Decimal(digits)
+
+
+def normalize_principal_input():
+    """
+    Chuẩn hóa số tiền trong ô nhập về dạng 1.234.567.890.
+
+    Hàm này được gọi bằng on_change của Streamlit nên không cần JavaScript
+    can thiệp trực tiếp vào DOM. Giá trị hiển thị và giá trị trong
+    st.session_state luôn đồng bộ.
+    """
+    raw = str(st.session_state.get("principal_input", ""))
+    digits = "".join(ch for ch in raw if ch.isdigit())
+
+    if not digits:
+        st.session_state["principal_input"] = ""
+        return
+
+    # Bỏ các số 0 vô nghĩa ở đầu nhưng vẫn giữ giá trị 0 nếu người dùng nhập 0.
+    digits = digits.lstrip("0") or "0"
+    st.session_state["principal_input"] = f"{int(digits):,}".replace(",", ".")
 
 
 def format_rate(value: Decimal) -> str:
@@ -452,178 +471,93 @@ st.caption(
     "ngày đáo hạn hoặc ngày rút không được tính lãi."
 )
 
-with st.form("deposit_form"):
-    col1, col2 = st.columns(2)
+# Khởi tạo giá trị tiền gửi chỉ một lần.
+if "principal_input" not in st.session_state:
+    st.session_state["principal_input"] = "100.000.000"
 
-    with col1:
-        principal_input = st.text_input(
-            "Số tiền khách hàng gửi (VND)",
-            value="100.000.000",
-            key="principal_input",
-            help="Có thể nhập liền các chữ số. Ví dụ 500000000 sẽ tự hiển thị thành 500.000.000.",
-        )
+col1, col2 = st.columns(2)
 
-        # Tự động thêm dấu chấm sau mỗi 3 chữ số ngay khi người dùng nhập.
-        # JavaScript chỉ định dạng phần hiển thị. Giá trị gửi về Python vẫn được
-        # xử lý lại bằng parse_vnd_input để bảo đảm an toàn.
-        components.html(
-            r"""
-            <script>
-            (function () {
-                const labelText = "Số tiền khách hàng gửi (VND)";
-
-                function formatVND(raw) {
-                    let digits = String(raw).replace(/\D/g, "");
-                    digits = digits.replace(/^0+(?=\d)/, "");
-                    if (!digits) return "";
-                    return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-                }
-
-                function findInput(doc) {
-                    let input = doc.querySelector(
-                        'input[aria-label="' + labelText + '"]'
-                    );
-                    if (input) return input;
-
-                    const labels = Array.from(doc.querySelectorAll("label"));
-                    const label = labels.find(
-                        el => el.innerText && el.innerText.trim() === labelText
-                    );
-                    if (!label) return null;
-
-                    const container = label.closest('[data-testid="stTextInput"]');
-                    return container ? container.querySelector("input") : null;
-                }
-
-                function attachFormatter() {
-                    const doc = window.parent.document;
-                    const input = findInput(doc);
-                    if (!input) return false;
-                    if (input.dataset.vndFormatterAttached === "1") return true;
-
-                    input.dataset.vndFormatterAttached = "1";
-                    input.setAttribute("inputmode", "numeric");
-
-                    const nativeSetter = Object.getOwnPropertyDescriptor(
-                        window.parent.HTMLInputElement.prototype,
-                        "value"
-                    ).set;
-
-                    function applyFormat(event) {
-                        if (input.dataset.vndFormatting === "1") return;
-
-                        const oldValue = input.value;
-                        const oldCursor = input.selectionStart == null
-                            ? oldValue.length
-                            : input.selectionStart;
-                        const digitsBeforeCursor = oldValue
-                            .slice(0, oldCursor)
-                            .replace(/\D/g, "").length;
-
-                        const formatted = formatVND(oldValue);
-                        if (formatted === oldValue) return;
-
-                        input.dataset.vndFormatting = "1";
-                        nativeSetter.call(input, formatted);
-                        input.dispatchEvent(new Event("input", { bubbles: true }));
-
-                        let newCursor = 0;
-                        let digitCount = 0;
-                        while (newCursor < formatted.length && digitCount < digitsBeforeCursor) {
-                            if (/\d/.test(formatted[newCursor])) digitCount += 1;
-                            newCursor += 1;
-                        }
-                        try {
-                            input.setSelectionRange(newCursor, newCursor);
-                        } catch (e) {}
-
-                        delete input.dataset.vndFormatting;
-                    }
-
-                    input.addEventListener("input", applyFormat);
-                    applyFormat();
-                    return true;
-                }
-
-                const timer = setInterval(function () {
-                    if (attachFormatter()) clearInterval(timer);
-                }, 100);
-
-                setTimeout(function () {
-                    clearInterval(timer);
-                }, 5000);
-            })();
-            </script>
-            """,
-            height=0,
-        )
-
-        term_rate_input = st.number_input(
-            "Lãi suất có kỳ hạn (%/năm)",
-            min_value=0.0,
-            value=5.0,
-            step=0.1,
-            format="%.3f",
-        )
-
-        demand_rate_input = st.number_input(
-            "Lãi suất không kỳ hạn (%/năm)",
-            min_value=0.0,
-            value=0.2,
-            step=0.05,
-            format="%.3f",
-        )
-
-        payout_method = st.radio(
-            "Cách nhận tiền lãi",
-            [
-                "Nhận lãi trước",
-                "Nhận lãi hàng tháng",
-                "Nhận lãi cuối kỳ",
-            ],
-        )
-
-    with col2:
-        deposit_date_input = st.date_input(
-            "Ngày gửi tiền",
-            value=date.today(),
-            format="DD/MM/YYYY",
-        )
-
-        withdrawal_date_input = st.date_input(
-            "Ngày rút tiền",
-            value=date.today() + timedelta(days=365),
-            format="DD/MM/YYYY",
-        )
-
-        term_col1, term_col2 = st.columns([2, 1])
-
-        with term_col1:
-            term_value_input = st.number_input(
-                "Kỳ hạn gửi tiền",
-                min_value=1,
-                value=12,
-                step=1,
-            )
-
-        with term_col2:
-            term_unit_input = st.selectbox(
-                "Đơn vị",
-                ["Tháng", "Ngày", "Năm"],
-            )
-
-        day_basis = st.selectbox(
-            "Cơ sở tính lãi",
-            [365, 360],
-            index=0,
-            help="Mặc định 365 ngày/năm. Có thể đổi thành 360 nếu quy định của ngân hàng yêu cầu.",
-        )
-
-    calculate_button = st.form_submit_button(
-        "TÍNH TOÁN",
-        type="primary",
-        use_container_width=True,
+with col1:
+    principal_input = st.text_input(
+        "Số tiền khách hàng gửi (VND)",
+        key="principal_input",
+        on_change=normalize_principal_input,
+        placeholder="Ví dụ: 500000000",
+        help=(
+            "Nhập các chữ số, ví dụ 500000000. "
+            "Khi nhấn Enter hoặc chuyển sang ô khác, ứng dụng tự định dạng thành 500.000.000."
+        ),
     )
+
+    term_rate_input = st.number_input(
+        "Lãi suất có kỳ hạn (%/năm)",
+        min_value=0.0,
+        value=5.0,
+        step=0.1,
+        format="%.3f",
+    )
+
+    demand_rate_input = st.number_input(
+        "Lãi suất không kỳ hạn (%/năm)",
+        min_value=0.0,
+        value=0.2,
+        step=0.05,
+        format="%.3f",
+    )
+
+    payout_method = st.radio(
+        "Cách nhận tiền lãi",
+        [
+            "Nhận lãi trước",
+            "Nhận lãi hàng tháng",
+            "Nhận lãi cuối kỳ",
+        ],
+    )
+
+with col2:
+    deposit_date_input = st.date_input(
+        "Ngày gửi tiền",
+        value=date.today(),
+        format="DD/MM/YYYY",
+    )
+
+    withdrawal_date_input = st.date_input(
+        "Ngày rút tiền",
+        value=date.today() + timedelta(days=365),
+        format="DD/MM/YYYY",
+    )
+
+    term_col1, term_col2 = st.columns([2, 1])
+
+    with term_col1:
+        term_value_input = st.number_input(
+            "Kỳ hạn gửi tiền",
+            min_value=1,
+            value=12,
+            step=1,
+        )
+
+    with term_col2:
+        term_unit_input = st.selectbox(
+            "Đơn vị",
+            ["Tháng", "Ngày", "Năm"],
+        )
+
+    day_basis = st.selectbox(
+        "Cơ sở tính lãi",
+        [365, 360],
+        index=0,
+        help=(
+            "Mặc định 365 ngày/năm. "
+            "Có thể đổi thành 360 nếu quy định của ngân hàng yêu cầu."
+        ),
+    )
+
+calculate_button = st.button(
+    "TÍNH TOÁN",
+    type="primary",
+    use_container_width=True,
+)
 
 
 # =========================
