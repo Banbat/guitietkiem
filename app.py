@@ -2,7 +2,7 @@ import streamlit as st
 
 # Cấu hình trang
 st.set_page_config(
-    page_title="Tính tiền lãi tiết kiệm",
+    page_title="Tính tiền lãi tiết kiệm của Thịnh Đẹp Try",
     page_icon="logo.jpg",
     layout="wide"
 )
